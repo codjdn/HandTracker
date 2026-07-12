@@ -80,7 +80,7 @@
     margin-bottom: 8px;
   }
 
-  #camera-toggle {
+  #camera-toggle, #trace-toggle {
     flex: none;
     display: block;
     width: 100%;
@@ -246,6 +246,7 @@
     <button class="shape-btn" data-shape="knot">Knot</button>
   </div>
   <button id="camera-toggle" class="shape-btn active">&#128247; Camera On</button>
+  <button id="trace-toggle" class="shape-btn active">&#9997;&#65039; Trace On</button>
   <div id="stats">
     <div class="row"><span class="label">Hands</span><span class="value" id="stat-hands">0</span></div>
     <div class="row"><span class="label">Size</span><span class="value" id="stat-size">1.00&times;</span></div>
@@ -360,6 +361,7 @@
   var energy = 0;             // smoothed motion energy driving the glow
   var firstResultsSeen = false;
   var disposed = false;
+  var tracingEnabled = true;   // finger trails on/off
 
   // Control targets fed by hand tracking, smoothed each render frame
   var target = { x: 0, y: 0, z: 0, scale: 1, rx: 0, ry: 0, rz: 0 };
@@ -569,11 +571,13 @@
       }
       prevPalm[label] = { x: palm.x, y: palm.y, t: now };
 
-      for (var f = 0; f < FINGERTIP_INDICES.length; f++) {
-        var key = label + '-' + FINGERTIP_INDICES[f];
-        if (!trails[key]) trails[key] = [];
-        trails[key].push({ x: pts[FINGERTIP_INDICES[f]].x, y: pts[FINGERTIP_INDICES[f]].y, t: now });
-        if (trails[key].length > 64) trails[key].shift();
+      if (tracingEnabled) {
+        for (var f = 0; f < FINGERTIP_INDICES.length; f++) {
+          var key = label + '-' + FINGERTIP_INDICES[f];
+          if (!trails[key]) trails[key] = [];
+          trails[key].push({ x: pts[FINGERTIP_INDICES[f]].x, y: pts[FINGERTIP_INDICES[f]].y, t: now });
+          if (trails[key].length > 64) trails[key].shift();
+        }
       }
     }
     motionTarget = handsLm.length ? clamp(maxSpeed * 1.6, 0, 1) : 0;
@@ -930,6 +934,14 @@
     var hidden = videoEl.classList.toggle('hidden-video');
     cameraToggleBtn.classList.toggle('active', !hidden);
     cameraToggleBtn.textContent = hidden ? '📷 Camera Off' : '📷 Camera On';
+  });
+
+  var traceToggleBtn = document.getElementById('trace-toggle');
+  traceToggleBtn.addEventListener('click', function () {
+    tracingEnabled = !tracingEnabled;
+    traceToggleBtn.classList.toggle('active', tracingEnabled);
+    traceToggleBtn.textContent = tracingEnabled ? '✏️ Trace On' : '✏️ Trace Off';
+    if (!tracingEnabled) trails = {};
   });
 
   document.getElementById('instructions-header').addEventListener('click', function () {
