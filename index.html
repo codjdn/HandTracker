@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Hand-Tracked 3D Shapes</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: radial-gradient(ellipse at 50% 40%, #131a3f 0%, #0a0e27 70%);
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #input-video { display: none; }
+
+  #three-container, #trail-canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  #three-container { z-index: 1; }
+  #trail-canvas { z-index: 2; pointer-events: none; }
+
+  /* ---------- Frosted glass panels ---------- */
+  .glass {
+    background: rgba(19, 26, 63, 0.55);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  }
+
+  #control-panel {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 10;
+    padding: 14px 16px;
+    width: 230px;
+    max-width: calc(100vw - 32px);
+  }
+
+  #control-panel h1 {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: linear-gradient(90deg, #60a5fa, #a78bfa);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 10px;
+  }
+
+  #shape-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  .shape-btn {
+    flex: 1 1 30%;
+    padding: 7px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #cbd5e1;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+  }
+  .shape-btn:hover { background: rgba(255, 255, 255, 0.12); }
+  .shape-btn:active { transform: scale(0.95); }
+  .shape-btn.active {
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    border-color: transparent;
+    color: #fff;
+    box-shadow: 0 2px 12px rgba(99, 102, 241, 0.55);
+  }
+
+  #stats { font-size: 12px; }
+  #stats .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  #stats .row:first-child { border-top: none; }
+  #stats .label { color: #94a3b8; }
+  #stats .value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #e2e8f0;
+  }
+  #stat-hands.detected { color: #34d399; }
+
+  /* ---------- Instructions panel ---------- */
+  #instructions {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 10;
+    padding: 12px 16px;
+    width: 270px;
+    max-width: calc(100vw - 32px);
+  }
+  #instructions header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+  }
+  #instructions h2 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #94a3b8;
+  }
+  #instructions #toggle-arrow { color: #64748b; font-size: 11px; transition: transform 0.2s; }
+  #instructions.collapsed #toggle-arrow { transform: rotate(-90deg); }
+  #instructions ul { list-style: none; margin-top: 8px; }
+  #instructions.collapsed ul { display: none; }
+  #instructions li {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: #cbd5e1;
+    padding: 3px 0;
+    display: flex;
+    gap: 8px;
+  }
+  #instructions li .icon { flex: 0 0 18px; text-align: center; }
+
+  /* ---------- Loading overlay ---------- */
+  #loading {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: #0a0e27;
+    transition: opacity 0.5s;
+  }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 46px;
+    height: 46px;
+    border: 3px solid rgba(255, 255, 255, 0.12);
+    border-top-color: #60a5fa;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading-text { font-size: 13px; color: #94a3b8; }
+
+  /* ---------- Error dialog ---------- */
+  #error-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 110;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 14, 39, 0.85);
+    padding: 20px;
+  }
+  #error-dialog.visible { display: flex; }
+  #error-dialog .dialog {
+    max-width: 380px;
+    padding: 26px;
+    text-align: center;
+  }
+  #error-dialog .dialog .icon { font-size: 40px; margin-bottom: 12px; }
+  #error-dialog h2 { font-size: 17px; margin-bottom: 10px; color: #f1f5f9; }
+  #error-dialog p { font-size: 13px; line-height: 1.55; color: #94a3b8; margin-bottom: 18px; }
+  #retry-btn {
+    padding: 10px 26px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    border: none;
+    border-radius: 9px;
+    cursor: pointer;
+  }
+  #retry-btn:active { transform: scale(0.96); }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width: 640px) {
+    #control-panel { top: 10px; left: 10px; width: 188px; padding: 10px 12px; }
+    #control-panel h1 { font-size: 12px; margin-bottom: 8px; }
+    .shape-btn { font-size: 10px; padding: 6px 2px; }
+    #stats { font-size: 11px; }
+    #instructions { bottom: 10px; right: 10px; width: 216px; padding: 10px 12px; }
+    #instructions li { font-size: 10.5px; }
+  }
+</style>
+</head>
+<body>
+
+<video id="input-video" playsinline autoplay muted></video>
+<div id="three-container"></div>
+<canvas id="trail-canvas"></canvas>
+
+<!-- Top-left: shape menu + stats -->
+<div id="control-panel" class="glass">
+  <h1>Hand Tracker 3D</h1>
+  <div id="shape-buttons">
+    <button class="shape-btn active" data-shape="cube">Cube</button>
+    <button class="shape-btn" data-shape="sphere">Sphere</button>
+    <button class="shape-btn" data-shape="dodecahedron">Dodeca</button>
+    <button class="shape-btn" data-shape="tetrahedron">Tetra</button>
+    <button class="shape-btn" data-shape="octahedron">Octa</button>
+  </div>
+  <div id="stats">
+    <div class="row"><span class="label">Hands</span><span class="value" id="stat-hands">0</span></div>
+    <div class="row"><span class="label">Size</span><span class="value" id="stat-size">1.00&times;</span></div>
+    <div class="row"><span class="label">Rotation</span><span class="value" id="stat-rotation">0&deg; 0&deg; 0&deg;</span></div>
+    <div class="row"><span class="label">FPS</span><span class="value" id="stat-fps">--</span></div>
+  </div>
+</div>
+
+<!-- Bottom-right: instructions -->
+<div id="instructions" class="glass">
+  <header id="instructions-header">
+    <h2>Controls</h2>
+    <span id="toggle-arrow">&#9660;</span>
+  </header>
+  <ul>
+    <li><span class="icon">&#9995;</span><span>One hand &mdash; shape follows your hand</span></li>
+    <li><span class="icon">&#128588;</span><span>Two hands &mdash; shape sits at the midpoint</span></li>
+    <li><span class="icon">&#8596;&#65039;</span><span>Spread hands apart to grow, together to shrink</span></li>
+    <li><span class="icon">&#128260;</span><span>Raise one hand to roll, push one forward to spin, tilt both to pitch</span></li>
+    <li><span class="icon">&#128248;</span><span>Move hands toward / away from the camera for depth</span></li>
+  </ul>
+</div>
+
+<!-- Loading overlay -->
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="loading-text">Initializing 3D scene&hellip;</div>
+</div>
+
+<!-- Camera permission error dialog -->
+<div id="error-dialog">
+  <div class="dialog glass">
+    <div class="icon">&#128247;</div>
+    <h2>Camera access needed</h2>
+    <p id="error-message">This app needs your webcam to track hand movements. Please allow camera access and try again.</p>
+    <button id="retry-btn">Retry</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.min.js"></script>
+
+<script>
+(function () {
+  'use strict';
+
+  // =========================================================================
+  // Config
+  // =========================================================================
+  var IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.maxTouchPoints > 2;
+
+  var TRAIL_LIFETIME_MS = 1500;                 // fingertip trails fade over 1.5 s
+  var FINGERTIP_INDICES = [4, 8, 12, 16, 20];   // thumb, index, middle, ring, pinky tips
+  var PALM_INDICES = [0, 5, 9, 13, 17];         // wrist + finger MCPs = palm centre
+  var TRAIL_COLORS = { Left: '#22d3ee', Right: '#f472b6' };
+
+  var CAM_FOV = 50;
+  var CAM_Z = 8;
+
+  // =========================================================================
+  // DOM references
+  // =========================================================================
+  var videoEl = document.getElementById('input-video');
+  var trailCanvas = document.getElementById('trail-canvas');
+  var trailCtx = trailCanvas.getContext('2d');
+  var threeContainer = document.getElementById('three-container');
+  var loadingEl = document.getElementById('loading');
+  var loadingTextEl = document.getElementById('loading-text');
+  var errorDialogEl = document.getElementById('error-dialog');
+  var errorMessageEl = document.getElementById('error-message');
+  var statHandsEl = document.getElementById('stat-hands');
+  var statSizeEl = document.getElementById('stat-size');
+  var statRotationEl = document.getElementById('stat-rotation');
+  var statFpsEl = document.getElementById('stat-fps');
+
+  // =========================================================================
+  // App state
+  // =========================================================================
+  var scene, camera, renderer, mesh, dirLight;
+  var viewHeight = 2 * Math.tan(THREE.MathUtils.degToRad(CAM_FOV / 2)) * CAM_Z;
+  var viewWidth = viewHeight * (window.innerWidth / window.innerHeight);
+
+  var handCount = 0;
+  var trails = {};            // key "Left-8" -> [{x, y, t}] in normalized screen coords
+  var firstResultsSeen = false;
+  var disposed = false;
+
+  // Control targets fed by hand tracking, smoothed each render frame
+  var target = { x: 0, y: 0, z: 0, scale: 1, rx: 0, ry: 0, rz: 0 };
+  var smooth = { x: 0, y: 0, z: 0, scale: 1, rx: 0, ry: 0, rz: 0 };
+
+  var fpsFrames = 0;
+  var fpsLastTime = performance.now();
+  var lastFrameTime = performance.now();
+  var lastStatsUpdate = 0;
+
+  // =========================================================================
+  // Small math helpers
+  // =========================================================================
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function mapLinear(v, a1, a2, b1, b2) { return b1 + (v - a1) * (b2 - b1) / (a2 - a1); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerpAngle(a, b, t) { return a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t; }
+  function dist2(a, b) { var dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx * dx + dy * dy); }
+  function deg(rad) {
+    var d = Math.round(THREE.MathUtils.radToDeg(rad)) % 360;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
+  }
+
+  // =========================================================================
+  // Three.js scene
+  // =========================================================================
+  function initThree() {
+    scene = new THREE.Scene();
+
+    camera = new THREE.PerspectiveCamera(CAM_FOV, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, CAM_Z);
+
+    renderer = new THREE.WebGLRenderer({ antialias: !IS_MOBILE, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, IS_MOBILE ? 1.5 : 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    threeContainer.appendChild(renderer.domElement);
+
+    // Lighting
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.55));
+
+    dirLight = new THREE.DirectionalLight(0xffffff, 0.95);
+    dirLight.position.set(5, 9, 7);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.set(IS_MOBILE ? 512 : 1024, IS_MOBILE ? 512 : 1024);
+    dirLight.shadow.camera.left = -10;
+    dirLight.shadow.camera.right = 10;
+    dirLight.shadow.camera.top = 10;
+    dirLight.shadow.camera.bottom = -10;
+    dirLight.shadow.camera.far = 40;
+    scene.add(dirLight);
+
+    var rim = new THREE.PointLight(0x6d8dff, 0.7, 40);
+    rim.position.set(-6, -3, 5);
+    scene.add(rim);
+
+    // Shadow-catcher floor
+    var floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 60),
+      new THREE.ShadowMaterial({ opacity: 0.3 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -viewHeight / 2 + 0.4;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    setShape('cube');
+  }
+
+  function buildGeometry(name) {
+    switch (name) {
+      case 'sphere':       return new THREE.SphereGeometry(1.1, IS_MOBILE ? 32 : 48, IS_MOBILE ? 22 : 32);
+      case 'dodecahedron': return new THREE.DodecahedronGeometry(1.2);
+      case 'tetrahedron':  return new THREE.TetrahedronGeometry(1.5);
+      case 'octahedron':   return new THREE.OctahedronGeometry(1.3);
+      case 'cube':
+      default:             return new THREE.BoxGeometry(1.6, 1.6, 1.6);
+    }
+  }
+
+  function setShape(name) {
+    var geometry = buildGeometry(name);
+    var material = new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(Math.random(), 0.72, 0.56), // random color per new shape
+      roughness: 0.35,
+      metalness: 0.25,
+      flatShading: name !== 'sphere'
+    });
+
+    if (mesh) {
+      // Dispose old GPU resources before swapping in the new shape
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+      mesh.geometry = geometry;
+      mesh.material = material;
+    } else {
+      mesh = new THREE.Mesh(geometry, material);
+      mesh.castShadow = true;
+      scene.add(mesh);
+    }
+  }
+
+  // =========================================================================
+  // Hand tracking → control targets
+  // =========================================================================
+  function handCenter(landmarks) {
+    var cx = 0, cy = 0;
+    for (var i = 0; i < PALM_INDICES.length; i++) {
+      cx += landmarks[PALM_INDICES[i]].x;
+      cy += landmarks[PALM_INDICES[i]].y;
+    }
+    return { x: cx / PALM_INDICES.length, y: cy / PALM_INDICES.length };
+  }
+
+  // Apparent hand size (wrist → middle MCP) is our proxy for distance from camera
+  function handDepthWorld(landmarks) {
+    var d = dist2(landmarks[0], landmarks[9]);
+    return clamp(mapLinear(d, 0.10, 0.35, -3.5, 2.5), -3.5, 2.5);
+  }
+
+  // Angle of the palm→fingers vector in (mirrored) screen space; 0 = fingers up
+  function handTilt(landmarks) {
+    var vx = -(landmarks[9].x - landmarks[0].x); // mirror x for selfie view
+    var vy = -(landmarks[9].y - landmarks[0].y); // screen y is down, world y is up
+    return Math.atan2(vx, vy);
+  }
+
+  function toWorldXY(nx, ny) {
+    // nx, ny are normalized [0,1] video coords; mirror x for selfie view
+    return {
+      x: ((1 - nx) - 0.5) * viewWidth * 0.9,
+      y: (0.5 - ny) * viewHeight * 0.9
+    };
+  }
+
+  function onResults(results) {
+    if (disposed) return;
+    if (!firstResultsSeen) {
+      firstResultsSeen = true;
+      loadingEl.classList.add('hidden');
+    }
+
+    var handsLm = results.multiHandLandmarks || [];
+    var handedness = results.multiHandedness || [];
+    handCount = handsLm.length;
+
+    var now = performance.now();
+
+    // --- Fingertip trails (fingertips only, 5 per hand) ---
+    for (var h = 0; h < handsLm.length; h++) {
+      var label = (handedness[h] && handedness[h].label) || ('Hand' + h);
+      for (var f = 0; f < FINGERTIP_INDICES.length; f++) {
+        var lm = handsLm[h][FINGERTIP_INDICES[f]];
+        var key = label + '-' + FINGERTIP_INDICES[f];
+        if (!trails[key]) trails[key] = [];
+        trails[key].push({ x: 1 - lm.x, y: lm.y, t: now }); // store mirrored
+        if (trails[key].length > 64) trails[key].shift();
+      }
+    }
+
+    // --- Shape control targets ---
+    if (handsLm.length >= 2) {
+      var cA = handCenter(handsLm[0]);
+      var cB = handCenter(handsLm[1]);
+      // Consistent ordering: A = left-most hand on the mirrored screen
+      if ((1 - cA.x) > (1 - cB.x)) {
+        var tmp = cA; cA = cB; cB = tmp;
+        tmp = handsLm[0]; handsLm = [handsLm[1], tmp];
+      }
+
+      var zA = handDepthWorld(handsLm[0]);
+      var zB = handDepthWorld(handsLm[1]);
+
+      // Position: midpoint between both hands, depth from average hand size
+      var mid = toWorldXY((cA.x + cB.x) / 2, (cA.y + cB.y) / 2);
+      target.x = mid.x;
+      target.y = mid.y;
+      target.z = (zA + zB) / 2;
+
+      // Size: distance between hands
+      var spread = dist2(cA, cB);
+      target.scale = clamp(mapLinear(spread, 0.15, 0.85, 0.35, 3.2), 0.3, 3.5);
+
+      // Rotation on all 3 axes:
+      //   roll (z)  — raise one hand above the other
+      //   yaw  (y)  — push one hand toward the camera
+      //   pitch (x) — tilt both hands sideways together
+      var ax = 1 - cA.x, bx = 1 - cB.x;
+      target.rz = Math.atan2(cA.y - cB.y, bx - ax);
+      target.ry = clamp((zB - zA) * 0.55, -1.4, 1.4);
+      target.rx = (handTilt(handsLm[0]) + handTilt(handsLm[1])) / 2;
+    } else if (handsLm.length === 1) {
+      // Single hand: shape follows the hand; size & rotation hold their last values
+      var c = handCenter(handsLm[0]);
+      var p = toWorldXY(c.x, c.y);
+      target.x = p.x;
+      target.y = p.y;
+      target.z = handDepthWorld(handsLm[0]);
+    }
+    // Zero hands: targets stay put; render loop adds a gentle idle spin
+  }
+
+  // =========================================================================
+  // Trail rendering (2D canvas overlay)
+  // =========================================================================
+  function drawTrails(now) {
+    var w = trailCanvas.width, h = trailCanvas.height;
+    trailCtx.clearRect(0, 0, w, h);
+    trailCtx.lineCap = 'round';
+    trailCtx.lineJoin = 'round';
+
+    for (var key in trails) {
+      var pts = trails[key];
+
+      // Drop expired points
+      while (pts.length && now - pts[0].t > TRAIL_LIFETIME_MS) pts.shift();
+      if (!pts.length) { delete trails[key]; continue; }
+
+      var color = TRAIL_COLORS[key.split('-')[0]] || '#a5b4fc';
+
+      for (var i = 1; i < pts.length; i++) {
+        var age = now - pts[i].t;
+        var alpha = 1 - age / TRAIL_LIFETIME_MS;
+        if (alpha <= 0) continue;
+        trailCtx.strokeStyle = color;
+        trailCtx.globalAlpha = alpha * 0.85;
+        trailCtx.lineWidth = 1 + alpha * 4;
+        trailCtx.beginPath();
+        trailCtx.moveTo(pts[i - 1].x * w, pts[i - 1].y * h);
+        trailCtx.lineTo(pts[i].x * w, pts[i].y * h);
+        trailCtx.stroke();
+      }
+
+      // Bright dot on the freshest point
+      var tip = pts[pts.length - 1];
+      if (now - tip.t < 120) {
+        trailCtx.globalAlpha = 0.95;
+        trailCtx.fillStyle = '#ffffff';
+        trailCtx.beginPath();
+        trailCtx.arc(tip.x * w, tip.y * h, 3, 0, Math.PI * 2);
+        trailCtx.fill();
+      }
+    }
+    trailCtx.globalAlpha = 1;
+  }
+
+  // =========================================================================
+  // Render loop
+  // =========================================================================
+  function animate() {
+    if (disposed) return;
+    requestAnimationFrame(animate);
+
+    var now = performance.now();
+    var dt = Math.min((now - lastFrameTime) / 1000, 0.1);
+    lastFrameTime = now;
+
+    // Frame-rate independent smoothing
+    var kPos = 1 - Math.exp(-dt * 9);
+    var kScale = 1 - Math.exp(-dt * 6);
+    var kRot = 1 - Math.exp(-dt * 7);
+
+    smooth.x = lerp(smooth.x, target.x, kPos);
+    smooth.y = lerp(smooth.y, target.y, kPos);
+    smooth.z = lerp(smooth.z, target.z, kPos);
+    smooth.scale = lerp(smooth.scale, target.scale, kScale);
+    smooth.rx = lerpAngle(smooth.rx, target.rx, kRot);
+    smooth.ry = lerpAngle(smooth.ry, target.ry, kRot);
+    smooth.rz = lerpAngle(smooth.rz, target.rz, kRot);
+
+    if (handCount === 0) {
+      // Idle: drift back to centre with a slow spin
+      target.x = 0; target.y = 0; target.z = 0;
+      target.ry += dt * 0.4;
+      target.rx += dt * 0.15;
+    }
+
+    if (mesh) {
+      mesh.position.set(smooth.x, smooth.y, smooth.z);
+      mesh.scale.setScalar(smooth.scale);
+      mesh.rotation.set(smooth.rx, smooth.ry, smooth.rz);
+    }
+
+    drawTrails(now);
+    renderer.render(scene, camera);
+
+    // FPS counter
+    fpsFrames++;
+    if (now - fpsLastTime >= 500) {
+      statFpsEl.textContent = Math.round(fpsFrames * 1000 / (now - fpsLastTime));
+      fpsFrames = 0;
+      fpsLastTime = now;
+    }
+
+    // Throttled stats panel updates (10 Hz)
+    if (now - lastStatsUpdate > 100) {
+      lastStatsUpdate = now;
+      statHandsEl.textContent = handCount;
+      statHandsEl.classList.toggle('detected', handCount > 0);
+      statSizeEl.textContent = smooth.scale.toFixed(2) + '×';
+      statRotationEl.textContent = deg(smooth.rx) + '° ' + deg(smooth.ry) + '° ' + deg(smooth.rz) + '°';
+    }
+  }
+
+  // =========================================================================
+  // MediaPipe Hands + camera
+  // =========================================================================
+  var hands = null;
+  var mpCamera = null;
+
+  function initHandTracking() {
+    loadingTextEl.textContent = 'Loading hand tracking model…';
+
+    hands = new Hands({
+      locateFile: function (file) {
+        return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/' + file;
+      }
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: IS_MOBILE ? 0 : 1,   // lighter model on mobile
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.5
+    });
+    hands.onResults(onResults);
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showCameraError({ name: 'NotSupportedError' });
+      return;
+    }
+
+    loadingTextEl.textContent = 'Requesting camera access…';
+
+    mpCamera = new Camera(videoEl, {
+      onFrame: function () { return hands.send({ image: videoEl }); },
+      width: 640,
+      height: 480,
+      facingMode: 'user'
+    });
+
+    Promise.resolve()
+      .then(function () { return mpCamera.start(); })
+      .then(function () {
+        loadingTextEl.textContent = 'Warming up hand tracking…';
+        // If the model still hasn't produced a frame after a while, reassure the user
+        setTimeout(function () {
+          if (!firstResultsSeen) loadingTextEl.textContent = 'Still loading model — slow connection?';
+        }, 12000);
+      })
+      .catch(showCameraError);
+  }
+
+  function showCameraError(err) {
+    loadingEl.classList.add('hidden');
+    var msg;
+    switch (err && err.name) {
+      case 'NotAllowedError':
+      case 'PermissionDeniedError':
+        msg = 'Camera permission was denied. Please allow camera access in your browser settings, then retry.';
+        break;
+      case 'NotFoundError':
+      case 'DevicesNotFoundError':
+        msg = 'No camera was found on this device. Connect a webcam and retry.';
+        break;
+      case 'NotReadableError':
+        msg = 'The camera is already in use by another application. Close it and retry.';
+        break;
+      case 'NotSupportedError':
+        msg = 'Camera access is not supported here. Make sure you are using a modern browser over HTTPS (or localhost).';
+        break;
+      default:
+        msg = 'Could not start the camera' + (err && err.message ? ': ' + err.message : '.') +
+              ' Note that camera access requires HTTPS or localhost.';
+    }
+    errorMessageEl.textContent = msg;
+    errorDialogEl.classList.add('visible');
+  }
+
+  // =========================================================================
+  // UI wiring
+  // =========================================================================
+  var shapeButtons = document.querySelectorAll('.shape-btn');
+  shapeButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      shapeButtons.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      setShape(btn.dataset.shape);
+    });
+  });
+
+  document.getElementById('instructions-header').addEventListener('click', function () {
+    document.getElementById('instructions').classList.toggle('collapsed');
+  });
+
+  document.getElementById('retry-btn').addEventListener('click', function () {
+    window.location.reload();
+  });
+
+  // =========================================================================
+  // Resize + cleanup
+  // =========================================================================
+  function onResize() {
+    var w = window.innerWidth, h = window.innerHeight;
+    viewWidth = viewHeight * (w / h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    trailCanvas.width = Math.round(w * dpr);
+    trailCanvas.height = Math.round(h * dpr);
+  }
+  window.addEventListener('resize', onResize);
+
+  window.addEventListener('beforeunload', function () {
+    disposed = true;
+    try { if (mpCamera) mpCamera.stop(); } catch (e) { /* ignore */ }
+    try { if (hands) hands.close(); } catch (e) { /* ignore */ }
+    if (mesh) {
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
+    if (renderer) renderer.dispose();
+  });
+
+  // =========================================================================
+  // Boot
+  // =========================================================================
+  initThree();
+  onResize();
+  animate();
+  initHandTracking();
+})();
+</script>
+</body>
+</html>
