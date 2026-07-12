@@ -243,6 +243,7 @@
     <button class="shape-btn" data-shape="dodecahedron">Dodeca</button>
     <button class="shape-btn" data-shape="tetrahedron">Tetra</button>
     <button class="shape-btn" data-shape="octahedron">Octa</button>
+    <button class="shape-btn" data-shape="knot">Knot</button>
   </div>
   <button id="camera-toggle" class="shape-btn active">&#128247; Camera On</button>
   <div id="stats">
@@ -260,12 +261,12 @@
     <span id="toggle-arrow">&#9660;</span>
   </header>
   <ul>
-    <li><span class="icon">&#9995;</span><span>One hand &mdash; shape follows your hand</span></li>
-    <li><span class="icon">&#128588;</span><span>Two hands &mdash; shape sits at the midpoint</span></li>
-    <li><span class="icon">&#8596;&#65039;</span><span>Spread hands apart to grow, together to shrink</span></li>
+    <li><span class="icon">&#9995;</span><span>One hand &mdash; shape follows it; tilt your hand to roll it</span></li>
+    <li><span class="icon">&#129295;</span><span>Pinch to shrink, spread your fingers to grow</span></li>
+    <li><span class="icon">&#128588;</span><span>Two hands &mdash; shape floats between them; spread apart to grow</span></li>
     <li><span class="icon">&#128260;</span><span>Raise one hand to roll, push one forward to spin, tilt both to pitch</span></li>
     <li><span class="icon">&#128248;</span><span>Move hands toward / away from the camera for depth</span></li>
-    <li><span class="icon">&#128247;</span><span>Camera button shows / hides the video feed</span></li>
+    <li><span class="icon">&#9889;</span><span>Move fast and the shape flares &mdash; energy flows along the tethers</span></li>
   </ul>
 </div>
 
@@ -298,10 +299,21 @@
   // =========================================================================
   var IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.maxTouchPoints > 2;
 
-  var TRAIL_LIFETIME_MS = 1500;                 // fingertip trails fade over 1.5 s
+  var TRAIL_LIFETIME_MS = 1200;                 // fingertip trails fade over 1.2 s
   var FINGERTIP_INDICES = [4, 8, 12, 16, 20];   // thumb, index, middle, ring, pinky tips
   var PALM_INDICES = [0, 5, 9, 13, 17];         // wrist + finger MCPs = palm centre
   var TRAIL_COLORS = { Left: '#22d3ee', Right: '#f472b6' };
+  var TRAIL_RGB = { Left: '34,211,238', Right: '244,114,182' };
+
+  // MediaPipe hand landmark skeleton (bones between the 21 landmarks)
+  var HAND_LINKS = [
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    [5, 9], [9, 10], [10, 11], [11, 12],
+    [9, 13], [13, 14], [14, 15], [15, 16],
+    [13, 17], [17, 18], [18, 19], [19, 20],
+    [0, 17]
+  ];
 
   var CAM_FOV = 50;
   var CAM_Z = 8;
@@ -325,12 +337,27 @@
   // =========================================================================
   // App state
   // =========================================================================
-  var scene, camera, renderer, mesh, dirLight;
+  var scene, camera, renderer;
   var viewHeight = 2 * Math.tan(THREE.MathUtils.degToRad(CAM_FOV / 2)) * CAM_Z;
   var viewWidth = viewHeight * (window.innerWidth / window.innerHeight);
 
+  // The shape is a group of layers: faint fill, crisp edge lines, an additive
+  // halo copy of the edges, and glowing points on the vertices.
+  var shapeGroup = null;
+  var haloLines = null;
+  var edgeMat, haloMat, fillMat, pointsMat;
+  var basePointSize = 0.1;
+  var baseHue = Math.random();
+  var vertexSprite = null;    // shared soft-dot texture for vertex points
+  var tmpVec = new THREE.Vector3();
+
   var handCount = 0;
   var trails = {};            // key "Left-8" -> [{x, y, t}] in normalized screen coords
+  var latestHands = [];       // latest landmarks per hand, mirrored normalized coords
+  var lastResultsTime = 0;
+  var prevPalm = {};          // label -> last palm position, for motion energy
+  var motionTarget = 0;       // instantaneous hand speed, normalized 0..1
+  var energy = 0;             // smoothed motion energy driving the glow
   var firstResultsSeen = false;
   var disposed = false;
 
@@ -370,72 +397,91 @@
     renderer = new THREE.WebGLRenderer({ antialias: !IS_MOBILE, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, IS_MOBILE ? 1.5 : 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     threeContainer.appendChild(renderer.domElement);
 
-    // Lighting
-    scene.add(new THREE.AmbientLight(0x8899cc, 0.55));
-
-    dirLight = new THREE.DirectionalLight(0xffffff, 0.95);
-    dirLight.position.set(5, 9, 7);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.set(IS_MOBILE ? 512 : 1024, IS_MOBILE ? 512 : 1024);
-    dirLight.shadow.camera.left = -10;
-    dirLight.shadow.camera.right = 10;
-    dirLight.shadow.camera.top = 10;
-    dirLight.shadow.camera.bottom = -10;
-    dirLight.shadow.camera.far = 40;
-    scene.add(dirLight);
-
-    var rim = new THREE.PointLight(0x6d8dff, 0.7, 40);
-    rim.position.set(-6, -3, 5);
-    scene.add(rim);
-
-    // Shadow-catcher floor
-    var floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(60, 60),
-      new THREE.ShadowMaterial({ opacity: 0.3 })
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -viewHeight / 2 + 0.4;
-    floor.receiveShadow = true;
-    scene.add(floor);
+    // Soft round sprite shared by all vertex-glow points
+    var c = document.createElement('canvas');
+    c.width = c.height = 64;
+    var g = c.getContext('2d');
+    var grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.35, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    vertexSprite = new THREE.CanvasTexture(c);
 
     setShape('cube');
   }
 
   function buildGeometry(name) {
     switch (name) {
-      case 'sphere':       return new THREE.SphereGeometry(1.1, IS_MOBILE ? 32 : 48, IS_MOBILE ? 22 : 32);
+      case 'sphere':       return new THREE.IcosahedronGeometry(1.2, 2); // geodesic ball
       case 'dodecahedron': return new THREE.DodecahedronGeometry(1.2);
       case 'tetrahedron':  return new THREE.TetrahedronGeometry(1.5);
       case 'octahedron':   return new THREE.OctahedronGeometry(1.3);
+      case 'knot':         return new THREE.TorusKnotGeometry(0.85, 0.3, IS_MOBILE ? 56 : 80, IS_MOBILE ? 8 : 10);
       case 'cube':
       default:             return new THREE.BoxGeometry(1.6, 1.6, 1.6);
     }
   }
 
+  // Deduplicated vertex positions, so each corner gets exactly one glow point
+  function uniqueVertexGeometry(geometry) {
+    var pos = geometry.attributes.position;
+    var seen = {}, verts = [];
+    for (var i = 0; i < pos.count; i++) {
+      var x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      var key = x.toFixed(3) + ',' + y.toFixed(3) + ',' + z.toFixed(3);
+      if (seen[key]) continue;
+      seen[key] = true;
+      verts.push(x, y, z);
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    return g;
+  }
+
   function setShape(name) {
+    if (shapeGroup) {
+      scene.remove(shapeGroup);
+      shapeGroup.traverse(function (obj) {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+    }
+
+    baseHue = Math.random(); // each new shape starts at its own hue
+
     var geometry = buildGeometry(name);
-    var material = new THREE.MeshStandardMaterial({
-      color: new THREE.Color().setHSL(Math.random(), 0.72, 0.56), // random color per new shape
-      roughness: 0.35,
-      metalness: 0.25,
-      flatShading: name !== 'sphere'
+    // Smooth surfaces show their full triangle lattice; flat solids only
+    // their true silhouette edges (threshold hides coplanar triangulation).
+    var smoothSurface = name === 'sphere' || name === 'knot';
+    var edges = new THREE.EdgesGeometry(geometry, smoothSurface ? 0.1 : 10);
+    basePointSize = name === 'knot' ? 0.055 : (name === 'sphere' ? 0.08 : 0.13);
+
+    edgeMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.95 });
+    haloMat = new THREE.LineBasicMaterial({
+      transparent: true, opacity: 0.22,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    fillMat = new THREE.MeshBasicMaterial({
+      transparent: true, opacity: 0.05, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    pointsMat = new THREE.PointsMaterial({
+      size: basePointSize, map: vertexSprite, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false
     });
 
-    if (mesh) {
-      // Dispose old GPU resources before swapping in the new shape
-      mesh.geometry.dispose();
-      mesh.material.dispose();
-      mesh.geometry = geometry;
-      mesh.material = material;
-    } else {
-      mesh = new THREE.Mesh(geometry, material);
-      mesh.castShadow = true;
-      scene.add(mesh);
-    }
+    shapeGroup = new THREE.Group();
+    shapeGroup.add(new THREE.Mesh(geometry, fillMat));
+    shapeGroup.add(new THREE.LineSegments(edges, edgeMat));
+    haloLines = new THREE.LineSegments(edges, haloMat);
+    haloLines.scale.setScalar(1.05);
+    shapeGroup.add(haloLines);
+    shapeGroup.add(new THREE.Points(uniqueVertexGeometry(geometry), pointsMat));
+    scene.add(shapeGroup);
   }
 
   // =========================================================================
@@ -497,18 +543,40 @@
     handCount = handsLm.length;
 
     var now = performance.now();
+    lastResultsTime = now;
 
-    // --- Fingertip trails (fingertips only, 5 per hand) ---
+    // --- Skeletons, fingertip trails, and motion energy ---
+    latestHands = [];
+    var maxSpeed = 0;
     for (var h = 0; h < handsLm.length; h++) {
       var label = (handedness[h] && handedness[h].label) || ('Hand' + h);
+
+      var pts = [];
+      for (var j = 0; j < handsLm[h].length; j++) {
+        pts.push({ x: 1 - handsLm[h][j].x, y: handsLm[h][j].y }); // store mirrored
+      }
+      latestHands.push({ label: label, pts: pts });
+
+      // Palm speed feeds the shape's glow — fast hands make it flare
+      var c0 = handCenter(handsLm[h]);
+      var palm = { x: 1 - c0.x, y: c0.y };
+      var prev = prevPalm[label];
+      if (prev) {
+        var dtSec = (now - prev.t) / 1000;
+        if (dtSec > 0.001 && dtSec < 0.5) {
+          maxSpeed = Math.max(maxSpeed, dist2(palm, prev) / dtSec);
+        }
+      }
+      prevPalm[label] = { x: palm.x, y: palm.y, t: now };
+
       for (var f = 0; f < FINGERTIP_INDICES.length; f++) {
-        var lm = handsLm[h][FINGERTIP_INDICES[f]];
         var key = label + '-' + FINGERTIP_INDICES[f];
         if (!trails[key]) trails[key] = [];
-        trails[key].push({ x: 1 - lm.x, y: lm.y, t: now }); // store mirrored
+        trails[key].push({ x: pts[FINGERTIP_INDICES[f]].x, y: pts[FINGERTIP_INDICES[f]].y, t: now });
         if (trails[key].length > 64) trails[key].shift();
       }
     }
+    motionTarget = handsLm.length ? clamp(maxSpeed * 1.6, 0, 1) : 0;
 
     // --- Shape control targets ---
     if (handsLm.length >= 2) {
@@ -542,21 +610,30 @@
       target.ry = clamp((zB - zA) * 0.55, -1.4, 1.4);
       target.rx = (handTilt(handsLm[0]) + handTilt(handsLm[1])) / 2;
     } else if (handsLm.length === 1) {
-      // Single hand: shape follows the hand; size & rotation hold their last values
-      var c = handCenter(handsLm[0]);
+      // Single hand: shape sticks to the hand and mimics it directly
+      var lm = handsLm[0];
+      var c = handCenter(lm);
       var p = toWorldXY(c.x, c.y);
       target.x = p.x;
       target.y = p.y;
-      target.z = handDepthWorld(handsLm[0]);
+      target.z = handDepthWorld(lm);
+
+      // Tilt your hand sideways and the shape rolls with it
+      target.rz = -handTilt(lm);
+
+      // Pinch thumb + index to shrink, open your fingers to grow
+      var pinch = dist2(lm[4], lm[8]) / Math.max(dist2(lm[0], lm[9]), 1e-4);
+      target.scale = clamp(mapLinear(pinch, 0.2, 1.0, 0.4, 2.4), 0.3, 3.5);
     }
     // Zero hands: targets stay put; render loop adds a gentle idle spin
   }
 
   // =========================================================================
-  // Trail rendering (2D canvas overlay)
+  // Overlay rendering (2D canvas): trails, hand skeletons, energy tethers
   // =========================================================================
-  function drawTrails(now) {
+  function drawOverlay(now) {
     var w = trailCanvas.width, h = trailCanvas.height;
+    var dpr = w / window.innerWidth;
     trailCtx.clearRect(0, 0, w, h);
     trailCtx.lineCap = 'round';
     trailCtx.lineJoin = 'round';
@@ -568,6 +645,7 @@
     var px = function (nx) { return offX + nx * vw * cScale; };
     var py = function (ny) { return offY + ny * vh * cScale; };
 
+    // --- Fingertip trails ---
     for (var key in trails) {
       var pts = trails[key];
 
@@ -582,22 +660,105 @@
         var alpha = 1 - age / TRAIL_LIFETIME_MS;
         if (alpha <= 0) continue;
         trailCtx.strokeStyle = color;
-        trailCtx.globalAlpha = alpha * 0.85;
-        trailCtx.lineWidth = 1 + alpha * 4;
+        trailCtx.globalAlpha = alpha * 0.8;
+        trailCtx.lineWidth = (1 + alpha * 3.5) * dpr;
         trailCtx.beginPath();
         trailCtx.moveTo(px(pts[i - 1].x), py(pts[i - 1].y));
         trailCtx.lineTo(px(pts[i].x), py(pts[i].y));
         trailCtx.stroke();
       }
+    }
 
-      // Bright dot on the freshest point
-      var tip = pts[pts.length - 1];
-      if (now - tip.t < 120) {
-        trailCtx.globalAlpha = 0.95;
-        trailCtx.fillStyle = '#ffffff';
+    // Anything below needs fresh tracking data
+    var fresh = latestHands.length && now - lastResultsTime < 400;
+    if (!fresh) { trailCtx.globalAlpha = 1; return; }
+
+    // Where the shape sits on screen, for the tethers
+    var proj = tmpVec.set(smooth.x, smooth.y, smooth.z).project(camera);
+    var shapeOnScreen = proj.z > -1 && proj.z < 1;
+    var sx = (proj.x * 0.5 + 0.5) * w;
+    var sy = (0.5 - proj.y * 0.5) * h;
+    var shapeRGB = Math.round(edgeMat.color.r * 255) + ',' +
+                   Math.round(edgeMat.color.g * 255) + ',' +
+                   Math.round(edgeMat.color.b * 255);
+
+    for (var hI = 0; hI < latestHands.length; hI++) {
+      var hand = latestHands[hI];
+      var color2 = TRAIL_COLORS[hand.label] || '#a5b4fc';
+      var rgb = TRAIL_RGB[hand.label] || '165,180,252';
+      var lm = hand.pts;
+
+      // --- Hand skeleton: wide soft pass, then a crisp bright pass ---
+      var strokeBones = function () {
         trailCtx.beginPath();
-        trailCtx.arc(px(tip.x), py(tip.y), 3, 0, Math.PI * 2);
+        for (var b = 0; b < HAND_LINKS.length; b++) {
+          var link = HAND_LINKS[b];
+          trailCtx.moveTo(px(lm[link[0]].x), py(lm[link[0]].y));
+          trailCtx.lineTo(px(lm[link[1]].x), py(lm[link[1]].y));
+        }
+        trailCtx.stroke();
+      };
+      trailCtx.strokeStyle = color2;
+      trailCtx.globalAlpha = 0.16;
+      trailCtx.lineWidth = 6 * dpr;
+      strokeBones();
+      trailCtx.globalAlpha = 0.85;
+      trailCtx.lineWidth = 1.4 * dpr;
+      strokeBones();
+
+      // Knuckle dots
+      trailCtx.fillStyle = '#ffffff';
+      trailCtx.globalAlpha = 0.85;
+      for (var d = 0; d < lm.length; d++) {
+        trailCtx.beginPath();
+        trailCtx.arc(px(lm[d].x), py(lm[d].y), 1.8 * dpr, 0, Math.PI * 2);
         trailCtx.fill();
+      }
+
+      // --- Palm glow ---
+      var gx = 0, gy = 0;
+      for (var pI = 0; pI < PALM_INDICES.length; pI++) {
+        gx += lm[PALM_INDICES[pI]].x;
+        gy += lm[PALM_INDICES[pI]].y;
+      }
+      var palmX = px(gx / PALM_INDICES.length), palmY = py(gy / PALM_INDICES.length);
+      var glowR = (24 + energy * 22) * dpr;
+      var glow = trailCtx.createRadialGradient(palmX, palmY, 0, palmX, palmY, glowR);
+      glow.addColorStop(0, 'rgba(' + rgb + ',0.55)');
+      glow.addColorStop(1, 'rgba(' + rgb + ',0)');
+      trailCtx.globalAlpha = 0.35 + energy * 0.4;
+      trailCtx.fillStyle = glow;
+      trailCtx.beginPath();
+      trailCtx.arc(palmX, palmY, glowR, 0, Math.PI * 2);
+      trailCtx.fill();
+
+      // --- Energy tether: a curved, flowing dashed line from palm to shape ---
+      if (shapeOnScreen) {
+        var mx = (palmX + sx) / 2 + (sy - palmY) * 0.18;
+        var my = (palmY + sy) / 2 - (sx - palmX) * 0.18;
+        var tetherGrad = trailCtx.createLinearGradient(palmX, palmY, sx, sy);
+        tetherGrad.addColorStop(0, 'rgba(' + rgb + ',0.9)');
+        tetherGrad.addColorStop(1, 'rgba(' + shapeRGB + ',0.1)');
+        trailCtx.strokeStyle = tetherGrad;
+
+        // Soft under-glow
+        trailCtx.globalAlpha = 0.12;
+        trailCtx.lineWidth = 7 * dpr;
+        trailCtx.beginPath();
+        trailCtx.moveTo(palmX, palmY);
+        trailCtx.quadraticCurveTo(mx, my, sx, sy);
+        trailCtx.stroke();
+
+        // Animated dashes flowing toward the shape
+        trailCtx.globalAlpha = 0.45 + energy * 0.45;
+        trailCtx.lineWidth = (1.4 + energy * 1.8) * dpr;
+        trailCtx.setLineDash([5 * dpr, 11 * dpr]);
+        trailCtx.lineDashOffset = -now * 0.05 * dpr;
+        trailCtx.beginPath();
+        trailCtx.moveTo(palmX, palmY);
+        trailCtx.quadraticCurveTo(mx, my, sx, sy);
+        trailCtx.stroke();
+        trailCtx.setLineDash([]);
       }
     }
     trailCtx.globalAlpha = 1;
@@ -614,10 +775,11 @@
     var dt = Math.min((now - lastFrameTime) / 1000, 0.1);
     lastFrameTime = now;
 
-    // Frame-rate independent smoothing
-    var kPos = 1 - Math.exp(-dt * 9);
-    var kScale = 1 - Math.exp(-dt * 6);
-    var kRot = 1 - Math.exp(-dt * 7);
+    // Frame-rate independent smoothing — tight, so the shape feels glued
+    // to your hands, with just enough easing to absorb tracking jitter
+    var kPos = 1 - Math.exp(-dt * 16);
+    var kScale = 1 - Math.exp(-dt * 11);
+    var kRot = 1 - Math.exp(-dt * 12);
 
     smooth.x = lerp(smooth.x, target.x, kPos);
     smooth.y = lerp(smooth.y, target.y, kPos);
@@ -634,13 +796,28 @@
       target.rx += dt * 0.15;
     }
 
-    if (mesh) {
-      mesh.position.set(smooth.x, smooth.y, smooth.z);
-      mesh.scale.setScalar(smooth.scale);
-      mesh.rotation.set(smooth.rx, smooth.ry, smooth.rz);
+    // Motion energy: fast hands make everything glow hotter
+    energy = lerp(energy, motionTarget, 1 - Math.exp(-dt * 5));
+
+    if (shapeGroup) {
+      shapeGroup.position.set(smooth.x, smooth.y, smooth.z);
+      shapeGroup.scale.setScalar(smooth.scale);
+      shapeGroup.rotation.set(smooth.rx, smooth.ry, smooth.rz);
+
+      // Slow hue drift + breathing halo, both amplified by hand motion
+      var hue = (baseHue + now / 60000 + energy * 0.07) % 1;
+      var pulse = 0.5 + 0.5 * Math.sin(now * 0.0025);
+      edgeMat.color.setHSL(hue, 0.85, 0.62 + energy * 0.18);
+      haloMat.color.setHSL((hue + 0.05) % 1, 0.9, 0.55);
+      haloMat.opacity = 0.16 + energy * 0.3 + pulse * 0.06;
+      haloLines.scale.setScalar(1.04 + energy * 0.06 + pulse * 0.015);
+      fillMat.color.setHSL(hue, 0.8, 0.5);
+      fillMat.opacity = 0.04 + energy * 0.08;
+      pointsMat.color.setHSL((hue + 0.08) % 1, 0.6, 0.85);
+      pointsMat.size = basePointSize * (1 + energy * 0.7 + pulse * 0.15);
     }
 
-    drawTrails(now);
+    drawOverlay(now);
     renderer.render(scene, camera);
 
     // FPS counter
@@ -782,10 +959,13 @@
     disposed = true;
     try { if (mpCamera) mpCamera.stop(); } catch (e) { /* ignore */ }
     try { if (hands) hands.close(); } catch (e) { /* ignore */ }
-    if (mesh) {
-      mesh.geometry.dispose();
-      mesh.material.dispose();
+    if (shapeGroup) {
+      shapeGroup.traverse(function (obj) {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
     }
+    if (vertexSprite) vertexSprite.dispose();
     if (renderer) renderer.dispose();
   });
 
