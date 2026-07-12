@@ -19,7 +19,18 @@
     user-select: none;
   }
 
-  #input-video { display: none; }
+  /* Mirrored full-screen webcam feed behind the 3D scene */
+  #input-video {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    z-index: 0;
+    transition: opacity 0.3s;
+  }
+  #input-video.hidden-video { opacity: 0; }
 
   #three-container, #trail-canvas {
     position: fixed;
@@ -66,6 +77,13 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  #camera-toggle {
+    flex: none;
+    display: block;
+    width: 100%;
     margin-bottom: 12px;
   }
 
@@ -226,6 +244,7 @@
     <button class="shape-btn" data-shape="tetrahedron">Tetra</button>
     <button class="shape-btn" data-shape="octahedron">Octa</button>
   </div>
+  <button id="camera-toggle" class="shape-btn active">&#128247; Camera On</button>
   <div id="stats">
     <div class="row"><span class="label">Hands</span><span class="value" id="stat-hands">0</span></div>
     <div class="row"><span class="label">Size</span><span class="value" id="stat-size">1.00&times;</span></div>
@@ -246,6 +265,7 @@
     <li><span class="icon">&#8596;&#65039;</span><span>Spread hands apart to grow, together to shrink</span></li>
     <li><span class="icon">&#128260;</span><span>Raise one hand to roll, push one forward to spin, tilt both to pitch</span></li>
     <li><span class="icon">&#128248;</span><span>Move hands toward / away from the camera for depth</span></li>
+    <li><span class="icon">&#128247;</span><span>Camera button shows / hides the video feed</span></li>
   </ul>
 </div>
 
@@ -443,11 +463,25 @@
     return Math.atan2(vx, vy);
   }
 
+  // The video is displayed mirrored with object-fit: cover, which crops it.
+  // Map (mirrored) normalized video coords to normalized screen coords so the
+  // shape and trails line up with what the user sees on the feed.
+  function videoToScreen(nx, ny) {
+    var vw = videoEl.videoWidth || 640, vh = videoEl.videoHeight || 480;
+    var sw = window.innerWidth, sh = window.innerHeight;
+    var scale = Math.max(sw / vw, sh / vh);
+    return {
+      x: ((sw - vw * scale) / 2 + nx * vw * scale) / sw,
+      y: ((sh - vh * scale) / 2 + ny * vh * scale) / sh
+    };
+  }
+
   function toWorldXY(nx, ny) {
     // nx, ny are normalized [0,1] video coords; mirror x for selfie view
+    var s = videoToScreen(1 - nx, ny);
     return {
-      x: ((1 - nx) - 0.5) * viewWidth * 0.9,
-      y: (0.5 - ny) * viewHeight * 0.9
+      x: (s.x - 0.5) * viewWidth,
+      y: (0.5 - s.y) * viewHeight
     };
   }
 
@@ -527,6 +561,13 @@
     trailCtx.lineCap = 'round';
     trailCtx.lineJoin = 'round';
 
+    // Same object-fit: cover transform as the video, in canvas pixels
+    var vw = videoEl.videoWidth || 640, vh = videoEl.videoHeight || 480;
+    var cScale = Math.max(w / vw, h / vh);
+    var offX = (w - vw * cScale) / 2, offY = (h - vh * cScale) / 2;
+    var px = function (nx) { return offX + nx * vw * cScale; };
+    var py = function (ny) { return offY + ny * vh * cScale; };
+
     for (var key in trails) {
       var pts = trails[key];
 
@@ -544,8 +585,8 @@
         trailCtx.globalAlpha = alpha * 0.85;
         trailCtx.lineWidth = 1 + alpha * 4;
         trailCtx.beginPath();
-        trailCtx.moveTo(pts[i - 1].x * w, pts[i - 1].y * h);
-        trailCtx.lineTo(pts[i].x * w, pts[i].y * h);
+        trailCtx.moveTo(px(pts[i - 1].x), py(pts[i - 1].y));
+        trailCtx.lineTo(px(pts[i].x), py(pts[i].y));
         trailCtx.stroke();
       }
 
@@ -555,7 +596,7 @@
         trailCtx.globalAlpha = 0.95;
         trailCtx.fillStyle = '#ffffff';
         trailCtx.beginPath();
-        trailCtx.arc(tip.x * w, tip.y * h, 3, 0, Math.PI * 2);
+        trailCtx.arc(px(tip.x), py(tip.y), 3, 0, Math.PI * 2);
         trailCtx.fill();
       }
     }
@@ -697,13 +738,21 @@
   // =========================================================================
   // UI wiring
   // =========================================================================
-  var shapeButtons = document.querySelectorAll('.shape-btn');
+  var shapeButtons = document.querySelectorAll('#shape-buttons .shape-btn');
   shapeButtons.forEach(function (btn) {
     btn.addEventListener('click', function () {
       shapeButtons.forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       setShape(btn.dataset.shape);
     });
+  });
+
+  var cameraToggleBtn = document.getElementById('camera-toggle');
+  cameraToggleBtn.addEventListener('click', function () {
+    // Only hides the feed visually — hand tracking keeps running
+    var hidden = videoEl.classList.toggle('hidden-video');
+    cameraToggleBtn.classList.toggle('active', !hidden);
+    cameraToggleBtn.textContent = hidden ? '📷 Camera Off' : '📷 Camera On';
   });
 
   document.getElementById('instructions-header').addEventListener('click', function () {

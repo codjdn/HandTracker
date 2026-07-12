@@ -34,6 +34,9 @@ over 1.5 seconds — cyan for one hand, pink for the other.
 
 ## Features
 
+- Full-screen mirrored webcam feed behind the 3D scene, with a camera button
+  in the panel to show/hide it (tracking keeps running either way); the shape
+  and trails are aligned to the visible video, including its edge cropping
 - 5 selectable shapes — Cube, Sphere, Dodecahedron, Tetrahedron, Octahedron —
   each spawned with a random color
 - Dark theme (`#0a0e27`) with frosted-glass UI panels
